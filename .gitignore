@@ -17,3 +17,4 @@ sdkconfig.old
 .vscode/
 .DS_Store
 *.swp
+*.publisher_working
