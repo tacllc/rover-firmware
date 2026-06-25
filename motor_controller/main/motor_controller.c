@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "driver/uart.h"
+#include "esp_timer.h"
 
 #include <rcl/rcl.h>
 #include <rcl/error_handling.h>
@@ -21,14 +22,22 @@
 
 #include <rmw_microros/custom_transport.h>
 
-
 #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){printf("Failed status on line %d: %d. Aborting.\n",__LINE__,(int)temp_rc);vTaskDelete(NULL);}}
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){printf("Failed status on line %d: %d. Continuing.\n",__LINE__,(int)temp_rc);}}
 
 #define WHEEL_BASE_M 0.30f
 
-rcl_publisher_t publisher;
-std_msgs__msg__Int32 msg;
+//	movement control timeout
+volatile int64_t last_cmd_vel_time_ms = 0;
+#define CMD_VEL_TIMEOUT_MS 500
+
+
+rcl_publisher_t left_wheel_publisher;
+rcl_publisher_t right_wheel_publisher;
+
+std_msgs__msg__Int32 left_wheel_msg;
+std_msgs__msg__Int32 right_wheel_msg;
+
 rcl_subscription_t cmd_vel_subscriber;
 geometry_msgs__msg__Twist cmd_vel_msg;
 volatile double last_linear_x = 0.0;
@@ -51,33 +60,58 @@ volatile int cmd_vel_count = 99999;
 // 	printf("cmd_vel_count=%d\n", cmd_vel_count);
 // }
 
+// void timer_callback(rcl_timer_t * timer, int64_t last_call_time)
+// {
+//     RCLC_UNUSED(last_call_time);
+
+//     if (timer != NULL) {
+//         float linear = (float)last_linear_x;
+//         float angular = (float)last_angular_z;
+
+//         float left_mps  = linear - (angular * WHEEL_BASE_M / 2.0f);
+//         float right_mps = linear + (angular * WHEEL_BASE_M / 2.0f);
+
+//         left_wheel_msg.data = (int)(left_mps * 1000.0f);
+//         right_wheel_msg.data = (int)(right_mps * 1000.0f);
+
+//         RCSOFTCHECK(rcl_publish(&left_wheel_publisher, &left_wheel_msg, NULL));
+//         RCSOFTCHECK(rcl_publish(&right_wheel_publisher, &right_wheel_msg, NULL));
+//     }
+// }
+
 void timer_callback(rcl_timer_t * timer, int64_t last_call_time)
 {
     RCLC_UNUSED(last_call_time);
 
     if (timer != NULL) {
+
         float linear = (float)last_linear_x;
         float angular = (float)last_angular_z;
+
+        // Stop if no cmd_vel has been received recently
+        int64_t now_ms = esp_timer_get_time() / 1000;
+        if ((now_ms - last_cmd_vel_time_ms) > CMD_VEL_TIMEOUT_MS) {
+            linear = 0.0f;
+            angular = 0.0f;
+        }
 
         float left_mps  = linear - (angular * WHEEL_BASE_M / 2.0f);
         float right_mps = linear + (angular * WHEEL_BASE_M / 2.0f);
 
-        msg.data = (int)(left_mps * 1000.0f);
-        RCSOFTCHECK(rcl_publish(&publisher, &msg, NULL));
+        left_wheel_msg.data = (int)(left_mps * 1000.0f);
+        right_wheel_msg.data = (int)(right_mps * 1000.0f);
 
-		printf(
-			"linear=%.2f angular=%.2f left=%.2f right=%.2f\n",
-			linear,
-			angular,
-			left_mps,
-			right_mps);		
+        RCSOFTCHECK(rcl_publish(&left_wheel_publisher, &left_wheel_msg, NULL));
+        RCSOFTCHECK(rcl_publish(&right_wheel_publisher, &right_wheel_msg, NULL));
     }
-	printf("Loop\n");
 }
+
 
 void cmd_vel_callback(const void * msgin)
 {
 	cmd_vel_count++;
+
+	last_cmd_vel_time_ms = esp_timer_get_time() / 1000;
 
     const geometry_msgs__msg__Twist * twist_msg =
         (const geometry_msgs__msg__Twist *)msgin;
@@ -102,12 +136,18 @@ void micro_ros_task(void * arg)
 	rcl_node_t node;
 	RCCHECK(rclc_node_init_default(&node, "esp32_int32_publisher", "", &support));
 
-	// create publisher
+	// create wheel publishers
 	RCCHECK(rclc_publisher_init_default(
-		&publisher,
+		&left_wheel_publisher,
 		&node,
 		ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
-		"freertos_int32_publisher"));
+		"left_wheel_target_mmps"));
+
+	RCCHECK(rclc_publisher_init_default(
+		&right_wheel_publisher,
+		&node,
+		ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+		"right_wheel_target_mmps"));
 
 	RCCHECK(rclc_subscription_init_best_effort(
 		&cmd_vel_subscriber,
@@ -137,7 +177,8 @@ void micro_ros_task(void * arg)
 		&cmd_vel_callback,
 		ON_NEW_DATA));	
 
-	msg.data = 0;
+	left_wheel_msg.data = 0;
+	right_wheel_msg.data = 0;
 
 	while(1){
 		rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
@@ -145,7 +186,8 @@ void micro_ros_task(void * arg)
 	}
 
 	// free resources
-	RCCHECK(rcl_publisher_fini(&publisher, &node));
+	RCCHECK(rcl_publisher_fini(&left_wheel_publisher, &node));
+	RCCHECK(rcl_publisher_fini(&right_wheel_publisher, &node));
 	RCCHECK(rcl_node_fini(&node));
 
   	vTaskDelete(NULL);
