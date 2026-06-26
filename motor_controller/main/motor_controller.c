@@ -17,183 +17,153 @@
 #include <rclc/executor.h>
 
 #include <rmw_microxrcedds_c/config.h>
-//#include <rmw_microros/rmw_microros.h>
-#include "esp32_serial_transport.h"
-
 #include <rmw_microros/custom_transport.h>
+
+#include "esp32_serial_transport.h"
+#include "motor_output.h"
 
 #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){printf("Failed status on line %d: %d. Aborting.\n",__LINE__,(int)temp_rc);vTaskDelete(NULL);}}
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){printf("Failed status on line %d: %d. Continuing.\n",__LINE__,(int)temp_rc);}}
 
 #define WHEEL_BASE_M 0.30f
-
-//	movement control timeout
-volatile int64_t last_cmd_vel_time_ms = 0;
 #define CMD_VEL_TIMEOUT_MS 500
+#define MOTOR_OUTPUT_TEST 0
 
+static rcl_publisher_t left_wheel_publisher;
+static rcl_publisher_t right_wheel_publisher;
+static std_msgs__msg__Int32 left_wheel_msg;
+static std_msgs__msg__Int32 right_wheel_msg;
 
-rcl_publisher_t left_wheel_publisher;
-rcl_publisher_t right_wheel_publisher;
+static rcl_subscription_t cmd_vel_subscriber;
+static geometry_msgs__msg__Twist cmd_vel_msg;
 
-std_msgs__msg__Int32 left_wheel_msg;
-std_msgs__msg__Int32 right_wheel_msg;
+static volatile double last_linear_x = 0.0;
+static volatile double last_angular_z = 0.0;
+static volatile int64_t last_cmd_vel_time_ms = 0;
 
-rcl_subscription_t cmd_vel_subscriber;
-geometry_msgs__msg__Twist cmd_vel_msg;
-volatile double last_linear_x = 0.0;
-volatile double last_angular_z = 0.0;
-volatile int cmd_vel_count = 99999;
+static volatile int left_motor_target_mmps = 0;
+static volatile int right_motor_target_mmps = 0;
 
-// void timer_callback(rcl_timer_t * timer, int64_t last_call_time)
-// {
-// 	// RCLC_UNUSED(last_call_time);
-// 	// if (timer != NULL) {
-// 	// 	RCSOFTCHECK(rcl_publish(&publisher, &msg, NULL));
-// 	// 	msg.data++;
-// 	// }
-// 	// printf("cmd_vel_count=%d\n", cmd_vel_count);
-//     RCLC_UNUSED(last_call_time);
-//     if (timer != NULL) {
-//         msg.data = (int)(last_linear_x * 1000.0);
-//         RCSOFTCHECK(rcl_publish(&publisher, &msg, NULL));
-//     }
-// 	printf("cmd_vel_count=%d\n", cmd_vel_count);
-// }
-
-// void timer_callback(rcl_timer_t * timer, int64_t last_call_time)
-// {
-//     RCLC_UNUSED(last_call_time);
-
-//     if (timer != NULL) {
-//         float linear = (float)last_linear_x;
-//         float angular = (float)last_angular_z;
-
-//         float left_mps  = linear - (angular * WHEEL_BASE_M / 2.0f);
-//         float right_mps = linear + (angular * WHEEL_BASE_M / 2.0f);
-
-//         left_wheel_msg.data = (int)(left_mps * 1000.0f);
-//         right_wheel_msg.data = (int)(right_mps * 1000.0f);
-
-//         RCSOFTCHECK(rcl_publish(&left_wheel_publisher, &left_wheel_msg, NULL));
-//         RCSOFTCHECK(rcl_publish(&right_wheel_publisher, &right_wheel_msg, NULL));
-//     }
-// }
+static size_t uart_port = UART_NUM_0;
 
 void timer_callback(rcl_timer_t * timer, int64_t last_call_time)
 {
     RCLC_UNUSED(last_call_time);
 
-    if (timer != NULL) {
-
-        float linear = (float)last_linear_x;
-        float angular = (float)last_angular_z;
-
-        // Stop if no cmd_vel has been received recently
-        int64_t now_ms = esp_timer_get_time() / 1000;
-        if ((now_ms - last_cmd_vel_time_ms) > CMD_VEL_TIMEOUT_MS) {
-            linear = 0.0f;
-            angular = 0.0f;
-        }
-
-        float left_mps  = linear - (angular * WHEEL_BASE_M / 2.0f);
-        float right_mps = linear + (angular * WHEEL_BASE_M / 2.0f);
-
-        left_wheel_msg.data = (int)(left_mps * 1000.0f);
-        right_wheel_msg.data = (int)(right_mps * 1000.0f);
-
-        RCSOFTCHECK(rcl_publish(&left_wheel_publisher, &left_wheel_msg, NULL));
-        RCSOFTCHECK(rcl_publish(&right_wheel_publisher, &right_wheel_msg, NULL));
+    if (timer == NULL) {
+        return;
     }
-}
 
+    float linear = (float)last_linear_x;
+    float angular = (float)last_angular_z;
+
+    int64_t now_ms = esp_timer_get_time() / 1000;
+
+    if ((now_ms - last_cmd_vel_time_ms) > CMD_VEL_TIMEOUT_MS) {
+        linear = 0.0f;
+        angular = 0.0f;
+    }
+
+    float left_mps  = linear - (angular * WHEEL_BASE_M / 2.0f);
+    float right_mps = linear + (angular * WHEEL_BASE_M / 2.0f);
+
+    // left_motor_target_mmps = (int)(left_mps * 1000.0f);
+    // right_motor_target_mmps = (int)(right_mps * 1000.0f);
+
+#if MOTOR_OUTPUT_TEST
+    left_motor_target_mmps = 500;
+    right_motor_target_mmps = -500;
+#else
+    left_motor_target_mmps = (int)(left_mps * 1000.0f);
+    right_motor_target_mmps = (int)(right_mps * 1000.0f);
+#endif
+
+    motor_output_update(left_motor_target_mmps, right_motor_target_mmps);    
+
+    left_wheel_msg.data = left_motor_target_mmps;
+    right_wheel_msg.data = right_motor_target_mmps;
+
+    motor_output_update(left_motor_target_mmps, right_motor_target_mmps);
+
+    RCSOFTCHECK(rcl_publish(&left_wheel_publisher, &left_wheel_msg, NULL));
+    RCSOFTCHECK(rcl_publish(&right_wheel_publisher, &right_wheel_msg, NULL));
+}
 
 void cmd_vel_callback(const void * msgin)
 {
-	cmd_vel_count++;
-
-	last_cmd_vel_time_ms = esp_timer_get_time() / 1000;
-
     const geometry_msgs__msg__Twist * twist_msg =
         (const geometry_msgs__msg__Twist *)msgin;
 
     last_linear_x = twist_msg->linear.x;
     last_angular_z = twist_msg->angular.z;
-
-    printf("cmd_vel received: linear.x=%.3f angular.z=%.3f\n",
-           last_linear_x,
-           last_angular_z);
+    last_cmd_vel_time_ms = esp_timer_get_time() / 1000;
 }
 
 void micro_ros_task(void * arg)
 {
-	rcl_allocator_t allocator = rcl_get_default_allocator();
-	rclc_support_t support;
+    (void)arg;
 
-	// create init_options
-	RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
+    rcl_allocator_t allocator = rcl_get_default_allocator();
+    rclc_support_t support;
 
-	// create node
-	rcl_node_t node;
-	RCCHECK(rclc_node_init_default(&node, "esp32_int32_publisher", "", &support));
+    RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
 
-	// create wheel publishers
-	RCCHECK(rclc_publisher_init_default(
-		&left_wheel_publisher,
-		&node,
-		ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
-		"left_wheel_target_mmps"));
+    rcl_node_t node;
+    RCCHECK(rclc_node_init_default(&node, "esp32_motor_controller", "", &support));
 
-	RCCHECK(rclc_publisher_init_default(
-		&right_wheel_publisher,
-		&node,
-		ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
-		"right_wheel_target_mmps"));
+    RCCHECK(rclc_publisher_init_default(
+        &left_wheel_publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+        "left_wheel_target_mmps"));
 
-	RCCHECK(rclc_subscription_init_best_effort(
-		&cmd_vel_subscriber,
-		&node,
-		ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
-		"cmd_vel"));
+    RCCHECK(rclc_publisher_init_default(
+        &right_wheel_publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+        "right_wheel_target_mmps"));
 
-	// create timer,
-	rcl_timer_t timer;
-	const unsigned int timer_timeout = 1000;
-	RCCHECK(rclc_timer_init_default2(
-		&timer,
-		&support,
-		RCL_MS_TO_NS(timer_timeout),
-		timer_callback,
-		true));
+    RCCHECK(rclc_subscription_init_best_effort(
+        &cmd_vel_subscriber,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+        "cmd_vel"));
 
-	// create executor
-	rclc_executor_t executor;
-	RCCHECK(rclc_executor_init(&executor, &support.context, 2, &allocator));
-	RCCHECK(rclc_executor_add_timer(&executor, &timer));
+    rcl_timer_t timer;
+    const unsigned int timer_timeout_ms = 100;
+    RCCHECK(rclc_timer_init_default2(
+        &timer,
+        &support,
+        RCL_MS_TO_NS(timer_timeout_ms),
+        timer_callback,
+        true));
 
-	RCCHECK(rclc_executor_add_subscription(
-		&executor,
-		&cmd_vel_subscriber,
-		&cmd_vel_msg,
-		&cmd_vel_callback,
-		ON_NEW_DATA));	
+    rclc_executor_t executor;
+    RCCHECK(rclc_executor_init(&executor, &support.context, 2, &allocator));
+    RCCHECK(rclc_executor_add_timer(&executor, &timer));
 
-	left_wheel_msg.data = 0;
-	right_wheel_msg.data = 0;
+    RCCHECK(rclc_executor_add_subscription(
+        &executor,
+        &cmd_vel_subscriber,
+        &cmd_vel_msg,
+        &cmd_vel_callback,
+        ON_NEW_DATA));
 
-	while(1){
-		rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
-		usleep(10000);
-	}
+    left_wheel_msg.data = 0;
+    right_wheel_msg.data = 0;
 
-	// free resources
-	RCCHECK(rcl_publisher_fini(&left_wheel_publisher, &node));
-	RCCHECK(rcl_publisher_fini(&right_wheel_publisher, &node));
-	RCCHECK(rcl_node_fini(&node));
+    while (1) {
+        rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
+        usleep(10000);
+    }
 
-  	vTaskDelete(NULL);
+    RCCHECK(rcl_publisher_fini(&left_wheel_publisher, &node));
+    RCCHECK(rcl_publisher_fini(&right_wheel_publisher, &node));
+    RCCHECK(rcl_subscription_fini(&cmd_vel_subscriber, &node));
+    RCCHECK(rcl_node_fini(&node));
+
+    vTaskDelete(NULL);
 }
-
-static size_t uart_port = UART_NUM_0;
 
 void app_main(void)
 {
@@ -208,7 +178,10 @@ void app_main(void)
     );
 #else
 #error micro-ROS transports misconfigured
-#endif  // RMW_UXRCE_TRANSPORT_CUSTOM
+#endif
+
+    motor_output_init();
+
     xTaskCreate(
         micro_ros_task,
         "uros_task",
@@ -218,3 +191,4 @@ void app_main(void)
         NULL
     );
 }
+
