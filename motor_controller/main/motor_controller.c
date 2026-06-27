@@ -9,6 +9,8 @@
 #include "driver/uart.h"
 #include "esp_timer.h"
 
+#include "encoder_input.h"
+
 #include <rcl/rcl.h>
 #include <rcl/error_handling.h>
 #include <std_msgs/msg/int32.h>
@@ -33,6 +35,11 @@ static rcl_publisher_t left_wheel_publisher;
 static rcl_publisher_t right_wheel_publisher;
 static std_msgs__msg__Int32 left_wheel_msg;
 static std_msgs__msg__Int32 right_wheel_msg;
+static std_msgs__msg__Int32 left_encoder_msg;
+static std_msgs__msg__Int32 right_encoder_msg;
+
+static rcl_publisher_t left_encoder_publisher;
+static rcl_publisher_t right_encoder_publisher;
 
 static rcl_subscription_t cmd_vel_subscriber;
 static geometry_msgs__msg__Twist cmd_vel_msg;
@@ -67,9 +74,6 @@ void timer_callback(rcl_timer_t * timer, int64_t last_call_time)
     float left_mps  = linear - (angular * WHEEL_BASE_M / 2.0f);
     float right_mps = linear + (angular * WHEEL_BASE_M / 2.0f);
 
-    // left_motor_target_mmps = (int)(left_mps * 1000.0f);
-    // right_motor_target_mmps = (int)(right_mps * 1000.0f);
-
 #if MOTOR_OUTPUT_TEST
     left_motor_target_mmps = 500;
     right_motor_target_mmps = -500;
@@ -78,15 +82,25 @@ void timer_callback(rcl_timer_t * timer, int64_t last_call_time)
     right_motor_target_mmps = (int)(right_mps * 1000.0f);
 #endif
 
-    motor_output_update(left_motor_target_mmps, right_motor_target_mmps);    
+    // left_wheel_msg.data = left_motor_target_mmps;
+    // right_wheel_msg.data = right_motor_target_mmps;
+    // motor_output_update(left_motor_target_mmps, right_motor_target_mmps);
+    // RCSOFTCHECK(rcl_publish(&left_wheel_publisher, &left_wheel_msg, NULL));
+    // RCSOFTCHECK(rcl_publish(&right_wheel_publisher, &right_wheel_msg, NULL));
 
-    left_wheel_msg.data = left_motor_target_mmps;
-    right_wheel_msg.data = right_motor_target_mmps;
+    left_wheel_msg.data = (int32_t)encoder_get_left_ticks();
+    right_wheel_msg.data = (int32_t)encoder_get_right_ticks();
+
+    // left_encoder_msg.data = (int32_t)encoder_get_left_ticks();
+    // right_encoder_msg.data = (int32_t)encoder_get_right_ticks();
 
     motor_output_update(left_motor_target_mmps, right_motor_target_mmps);
 
     RCSOFTCHECK(rcl_publish(&left_wheel_publisher, &left_wheel_msg, NULL));
     RCSOFTCHECK(rcl_publish(&right_wheel_publisher, &right_wheel_msg, NULL));
+
+    RCSOFTCHECK(rcl_publish(&left_encoder_publisher, &left_encoder_msg, NULL));
+    RCSOFTCHECK(rcl_publish(&right_encoder_publisher, &right_encoder_msg, NULL));    
 }
 
 void cmd_vel_callback(const void * msgin)
@@ -129,6 +143,18 @@ void micro_ros_task(void * arg)
         ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
         "cmd_vel"));
 
+    // RCCHECK(rclc_publisher_init_default(
+    //     &left_encoder_publisher,
+    //     &node,
+    //     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+    //     "left_encoder_ticks"));
+
+    // RCCHECK(rclc_publisher_init_default(
+    //     &right_encoder_publisher,
+    //     &node,
+    //     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+    //     "right_encoder_ticks"));        
+
     rcl_timer_t timer;
     const unsigned int timer_timeout_ms = 100;
     RCCHECK(rclc_timer_init_default2(
@@ -152,7 +178,16 @@ void micro_ros_task(void * arg)
     left_wheel_msg.data = 0;
     right_wheel_msg.data = 0;
 
+    left_encoder_msg.data = 0;
+    right_encoder_msg.data = 0;
+
     while (1) {
+
+        ESP_LOGI("encoder_test",
+            "Left=%lld  Right=%lld",
+            encoder_get_left_ticks(),
+            encoder_get_right_ticks());
+
         rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
         usleep(10000);
     }
@@ -163,6 +198,19 @@ void micro_ros_task(void * arg)
     RCCHECK(rcl_node_fini(&node));
 
     vTaskDelete(NULL);
+}
+
+static void encoder_diag_task(void *arg)
+{
+    while (1)
+    {
+        ESP_LOGI("encoder_diag",
+            "Left=%lld Right=%lld",
+            encoder_get_left_ticks(),
+            encoder_get_right_ticks());
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 }
 
 void app_main(void)
@@ -181,6 +229,16 @@ void app_main(void)
 #endif
 
     motor_output_init();
+    encoder_input_init();
+
+    xTaskCreate(
+        encoder_diag_task,
+        "encoder_diag",
+        4096,
+        NULL,
+        2,
+        NULL
+    );
 
     xTaskCreate(
         micro_ros_task,

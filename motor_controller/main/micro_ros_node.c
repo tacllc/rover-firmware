@@ -13,15 +13,23 @@
 
 #include "micro_ros_node.h"
 #include "rover_control.h"
+#include "encoder_input.h"
 
 #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){printf("Failed status on line %d: %d. Aborting.\n",__LINE__,(int)temp_rc);vTaskDelete(NULL);}}
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){printf("Failed status on line %d: %d. Continuing.\n",__LINE__,(int)temp_rc);}}
 
+//wheel
 static rcl_publisher_t left_wheel_publisher;
 static rcl_publisher_t right_wheel_publisher;
-
+//encoder
+static rcl_publisher_t left_encoder_publisher;
+static rcl_publisher_t right_encoder_publisher;
+//wheel
 static std_msgs__msg__Int32 left_wheel_msg;
 static std_msgs__msg__Int32 right_wheel_msg;
+// encoder
+static std_msgs__msg__Int32 left_encoder_msg;
+static std_msgs__msg__Int32 right_encoder_msg;
 
 static rcl_subscription_t cmd_vel_subscriber;
 static geometry_msgs__msg__Twist cmd_vel_msg;
@@ -42,8 +50,14 @@ static void timer_callback(rcl_timer_t * timer, int64_t last_call_time)
     left_wheel_msg.data = left_mmps;
     right_wheel_msg.data = right_mmps;
 
+    left_encoder_msg.data = (int32_t)encoder_get_left_ticks();
+    right_encoder_msg.data = (int32_t)encoder_get_right_ticks();
+
     RCSOFTCHECK(rcl_publish(&left_wheel_publisher, &left_wheel_msg, NULL));
     RCSOFTCHECK(rcl_publish(&right_wheel_publisher, &right_wheel_msg, NULL));
+
+    RCSOFTCHECK(rcl_publish(&left_encoder_publisher, &left_encoder_msg, NULL));
+    //RCSOFTCHECK(rcl_publish(&right_encoder_publisher, &right_encoder_msg, NULL));
 }
 
 static void cmd_vel_callback(const void * msgin)
@@ -111,6 +125,9 @@ void micro_ros_task(void * arg)
     left_wheel_msg.data = 0;
     right_wheel_msg.data = 0;
 
+    left_encoder_msg.data = 0;
+    right_encoder_msg.data = 0;
+
     while (1) {
         rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
         usleep(10000);
@@ -118,6 +135,8 @@ void micro_ros_task(void * arg)
 
     RCCHECK(rcl_publisher_fini(&left_wheel_publisher, &node));
     RCCHECK(rcl_publisher_fini(&right_wheel_publisher, &node));
+    RCCHECK(rcl_publisher_fini(&left_encoder_publisher, &node));
+    RCCHECK(rcl_publisher_fini(&right_encoder_publisher, &node));
     RCCHECK(rcl_subscription_fini(&cmd_vel_subscriber, &node));
     RCCHECK(rcl_node_fini(&node));
 
